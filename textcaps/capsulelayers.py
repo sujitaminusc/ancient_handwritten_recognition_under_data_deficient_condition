@@ -3,12 +3,6 @@ import tensorflow as tf
 from keras import initializers, layers
 
 class Length(layers.Layer):
-    """
-    Compute the length of vectors. This is used to compute a Tensor that has the same shape with y_true in margin_loss.
-    Using this layer as model's output can directly predict labels by using `y_pred = np.argmax(model.predict(x), 1)`
-    inputs: shape=[None, num_vectors, dim_vector]
-    output: shape=[None, num_vectors]
-    """
     def call(self, inputs, **kwargs):
         return K.sqrt(K.sum(K.square(inputs), -1))
 
@@ -21,19 +15,6 @@ class Length(layers.Layer):
 
 
 class Mask(layers.Layer):
-    """
-    Mask a Tensor with shape=[None, num_capsule, dim_vector] either by the capsule with max length or by an additional 
-    input mask. Except the max-length capsule (or specified capsule), all vectors are masked to zeros. Then flatten the
-    masked Tensor.
-    For example:
-        ```
-        x = keras.layers.Input(shape=[8, 3, 2])  # batch_size=8, each sample contains 3 capsules with dim_vector=2
-        y = keras.layers.Input(shape=[8, 3])  # True labels. 8 samples, 3 classes, one-hot coding.
-        out = Mask()(x)  # out.shape=[8, 6]
-        # or
-        out2 = Mask()([x, y])  # out2.shape=[8,6]. Masked with true labels y. Of course y can also be manipulated.
-        ```
-    """
     def call(self, inputs, **kwargs):
         if type(inputs) is list:
             assert len(inputs) == 2
@@ -57,28 +38,11 @@ class Mask(layers.Layer):
 
 
 def squash(vectors, axis=-1):
-    """
-    The non-linear activation used in Capsule. It drives the length of a large vector to near 1 and small vector to 0
-    :param vectors: some vectors to be squashed, N-dim tensor
-    :param axis: the axis to squash
-    :return: a Tensor with same shape as input vectors
-    """
     s_squared_norm = K.sum(K.square(vectors), axis, keepdims=True)
     scale = s_squared_norm / (1 + s_squared_norm) / K.sqrt(s_squared_norm + K.epsilon())
     return scale * vectors
 
 class CapsuleLayer(layers.Layer):
-    """
-    The capsule layer. It is similar to Dense layer. Dense layer has `in_num` inputs, each is a scalar, the output of the
-    neuron from the former layer, and it has `out_num` output neurons. CapsuleLayer just expand the output of the neuron
-    from scalar to vector. So its input shape = [None, input_num_capsule, input_dim_capsule] and output shape = \
-    [None, num_capsule, dim_capsule]. For Dense Layer, input_dim_capsule = dim_capsule = 1.
-
-    :param num_capsule: number of capsules in this layer
-    :param dim_capsule: dimension of the output vectors of the capsules in this layer
-    :param routings: number of iterations for the routing algorithm
-    """
-    
     def __init__(self, num_capsule, dim_capsule,channels, routings=3,
                  kernel_initializer='glorot_uniform',
                  **kwargs):
@@ -145,13 +109,6 @@ class CapsuleLayer(layers.Layer):
         return tuple([None, self.num_capsule, self.dim_capsule])
 
 def PrimaryCap(inputs, dim_capsule, n_channels, kernel_size, strides, padding):
-    """
-    Apply Conv2D `n_channels` times and concatenate all capsules
-    :param inputs: 4D tensor, shape=[None, width, height, channels]
-    :param dim_capsule: the dim of the output vector of capsule
-    :param n_channels: the number of types of capsules
-    :return: output tensor, shape=[None, num_capsule, dim_capsule]
-    """
     output = layers.Conv2D(filters=dim_capsule*n_channels, kernel_size=kernel_size, strides=strides, padding=padding,
                            name='primarycap_conv2d')(inputs)
     outputs = layers.Reshape(target_shape=[-1, dim_capsule], name='primarycap_reshape')(output)

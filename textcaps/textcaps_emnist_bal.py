@@ -22,9 +22,6 @@ import argparse
 
 K.set_image_data_format('channels_last')
 
-"""
-Switching the GPU to allow growth
-"""
 config = tf.ConfigProto()
 config.gpu_options.allow_growth=True
 sess = tf.Session(config=config)
@@ -32,13 +29,6 @@ K.set_session(sess)
 
 
 def CapsNet(input_shape, n_class, routings):
-    """
-    Defining the CapsNet
-    :param input_shape: data shape, 3d, [width, height, channels]
-    :param n_class: number of classes
-    :param routings: number of routing iterations
-    :return: Two Keras Models, the first one used for training, and the second one for evaluation.
-    """
     x = layers.Input(shape=input_shape)
     conv1 = layers.Conv2D(filters=64, kernel_size=3, strides=1, padding='valid', activation='relu', name='conv1')(x)
     conv2 = layers.Conv2D(filters=128, kernel_size=3, strides=1, padding='valid', activation='relu', name='conv2')(conv1)
@@ -47,9 +37,6 @@ def CapsNet(input_shape, n_class, routings):
     digitcaps = CapsuleLayer(num_capsule=n_class, dim_capsule=16, routings=routings,channels=32,name='digitcaps')(primarycaps)    
     out_caps = Length(name='capsnet')(digitcaps)
 
-    """
-    Decoder Network
-    """
     y = layers.Input(shape=(n_class,))
     masked_by_y = Mask()([digitcaps, y])
     masked = Mask()(digitcaps) 
@@ -65,9 +52,6 @@ def CapsNet(input_shape, n_class, routings):
     decoder.add(layers.Deconvolution2D(1, 3, 3,subsample=(1, 1),border_mode='same', activation="sigmoid"))
     decoder.add(layers.Reshape(target_shape=input_shape, name='out_recon'))     
     
-    """
-    Models for training and evaluation (prediction)
-    """
     train_model = models.Model([x, y], [out_caps, decoder(masked_by_y)])
     eval_model = models.Model(x, [out_caps, decoder(masked)])
 
@@ -75,12 +59,6 @@ def CapsNet(input_shape, n_class, routings):
 
 
 def margin_loss(y_true, y_pred):
-    """
-    Marginal loss used for the CapsNet training
-    :param y_true: [None, n_classes]
-    :param y_pred: [None, num_capsule]
-    :return: a scalar loss value.
-    """
     L = y_true * K.square(K.maximum(0., 0.9 - y_pred)) + \
         0.5 * (1 - y_true) * K.square(K.maximum(0., y_pred - 0.1))
 
@@ -88,13 +66,6 @@ def margin_loss(y_true, y_pred):
 
 
 def train(model, data, args):
-    """
-    Training a CapsuleNet
-    :param model: the CapsuleNet model
-    :param data: a tuple containing training and testing data, like `((x_train, y_train), (x_test, y_test))`
-    :param args: arguments
-    :return: The trained model
-    """
     (x_train, y_train), (x_test, y_test) = data
 
     log = callbacks.CSVLogger(args.save_dir + '/log.csv')
@@ -129,9 +100,6 @@ def train(model, data, args):
 
 
 def test(model, data, args):
-    """
-    Testing the trained CapsuleNet
-    """
     x_test, y_test = data
     y_pred, x_recon = model.predict(x_test, batch_size=args.batch_size*8)
     print('-'*30 + 'Begin: test' + '-'*30)
@@ -139,13 +107,6 @@ def test(model, data, args):
     
 class dataGeneration():
     def __init__(self, model,data,args,samples_to_generate = 2):
-        """
-        Generating new images 
-        :param model: the pre-trained CapsNet model
-        :param data: a tuple containing training and testing data, like `((x_train, y_train), (x_test, y_test))`
-        :param args: arguments
-        :param samples_to_generate: number of new training samples to generate per class
-        """
         self.model = model
         self.data = data
         self.args = args
@@ -156,35 +117,19 @@ class dataGeneration():
         self.data = (x_train, y_train), (x_test, y_test)
         self.reconstructions = x_recon
         self.inst_parameter, self.global_position, self.masked_inst_parameter = self.get_inst_parameters()
-        print("Instantiation parameters extracted.")
-        print("-"*100)
         self.x_decoder_retrain,self.y_decoder_retrain = self.decoder_retraining_dataset()
         self.retrained_decoder = self.decoder_retraining()
-        print("Decoder re-training completed.")
-        print("-"*100)
         self.class_variance, self.class_max, self.class_min = self.get_limits()
         self.generated_images,self.generated_labels = self.generate_data()
-        print("New images of the shape ",self.generated_images.shape," Generated.")
-        print("-"*100)
-
+        
     def save_output_image(self,samples,image_name):
-        """
-        Visualizing and saving images in the .png format 
-        :param samples: images to be visualized
-        :param image_name: name of the saved .png file
-        """
         if not os.path.exists(args.save_dir+"/images"):
             os.makedirs(args.save_dir+"/images")
         img = combine_images(samples)
         img = img * 255
         Image.fromarray(img.astype(np.uint8)).save(args.save_dir + "/images/"+image_name+".png")
-        print(image_name, "Image saved.")
 
     def remove_missclassifications(self):
-        """
-        Removing the wrongly classified samples from the training set. We do not alter the testing set.
-        :return: dataset with miss classified samples removed and the initial reconstructions.
-        """
         model = self.model
         data = self.data
         args = self.args   
@@ -202,10 +147,6 @@ class dataGeneration():
         
         
     def get_inst_parameters(self):
-        """
-        Extracting the instantiation parameters for the existing training set
-        :return: instantiation parameters, corresponding labels and the masked instantiation parameters
-        """
         model = self.model
         data = self.data
         args = self.args
@@ -268,10 +209,6 @@ class dataGeneration():
         return x_inst,pos,x_masked_inst
     
     def decoder_retraining_dataset(self):
-        """
-        Generating the dataset for the decoder retraining technique with unsharp masking
-        :return: training samples and labels for decoder retraining 
-        """
         model = self.model
         data = self.data
         args = self.args
@@ -300,10 +237,6 @@ class dataGeneration():
         return x_decoder_retrain,y_decoder_retrain
     
     def decoder_retraining(self):
-        """
-        The decoder retraining technique to give the sharpening ability to the decoder 
-        :return: the retrained decoder
-        """
         model = self.model
         data = self.data
         args = self.args
@@ -327,10 +260,6 @@ class dataGeneration():
         return retrained_decoder
         
     def get_limits(self):
-        """
-        Calculating the boundaries of the instantiation parameter distributions
-        :return: instantiation parameter indices in the descending order of variance, min and max values per class
-        """
         args = self.args
         x_inst = self.inst_parameter
         pos = self.global_position
@@ -368,10 +297,6 @@ class dataGeneration():
         return class_cov,class_max,class_min
 
     def generate_data(self):
-        """
-        Generating new images and samples with the data generation technique 
-        :return: the newly generated images and labels
-        """
         data = self.data
         args = self.args   
         (x_train, y_train), (x_test, y_test) = data
@@ -413,9 +338,6 @@ class dataGeneration():
         return generated_images,generated_labels
 
 if __name__ == "__main__":
-    """
-    Setting the hyper-parameters
-    """
     parser = argparse.ArgumentParser(description="TextCaps")
     parser.add_argument('--epochs', default=60, type=int)
     parser.add_argument('--verbose', default=False, type=bool)
@@ -452,12 +374,6 @@ if __name__ == "__main__":
     if (args.verbose):
         model.summary()
 
-    """
-    Snap shot training
-    :param M: number of snapshots
-    :param nb_epoch: number of epochs
-    :param alpha_zero: initial learning rate
-    """
     M = 3
     nb_epoch = T = args.epochs
     alpha_zero = 0.01
