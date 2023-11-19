@@ -6,9 +6,9 @@ def combine_images(generated_images, height=None, width=None):
     if width is None and height is None:
         width = int(math.sqrt(num))
         height = int(math.ceil(float(num)/width))
-    elif width is not None and height is None:  # height not given
+    elif width is not None and height is None:
         height = int(math.ceil(float(num)/width))
-    elif height is not None and width is None:  # width not given
+    elif height is not None and width is None: 
         width = int(math.ceil(float(num)/height))
 
     shape = generated_images.shape[1:3]
