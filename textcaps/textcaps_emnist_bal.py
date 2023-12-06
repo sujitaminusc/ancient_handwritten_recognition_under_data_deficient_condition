@@ -357,7 +357,7 @@ if __name__ == "__main__":
                         help="Fraction of pixels to shift at most in each direction.")
     parser.add_argument('--save_dir', default='./emnist_bal_200')
     parser.add_argument('-dg', '--data_generate', action='store_true',
-                        help="Generate new data with pre-trained model")
+                        help="Generate new data2 with pre-trained model")
     parser.add_argument('-w', '--weights', default=None,
                         help="The path of the saved weights. Should be specified when testing")
     args = parser.parse_args()
