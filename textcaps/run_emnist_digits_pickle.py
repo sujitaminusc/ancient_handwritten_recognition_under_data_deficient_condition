@@ -4,13 +4,11 @@ import tensorflow as tf
 
 def load_emnist_balanced(cnt):
     from scipy import io as spio
-    #from keras.utils import to_categorical
     import numpy as np
     emnist = spio.loadmat("emnist-digits.mat")
 
     classes = 10
     cnt = cnt
-    lim_train = cnt*classes
 
     x_test = emnist["dataset"][0][0][1][0][0][0]
     x_test = x_test.astype(np.float32)

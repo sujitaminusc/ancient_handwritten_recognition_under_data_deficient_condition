@@ -1,23 +1,22 @@
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-
 from tensorflow.keras.models import load_model
 
-#test data rescaled.
-# since we only working on non-rgb images.
-test_input = ImageDataGenerator(rescale= 1/255.0)
+#add to increase the number of test images.
+test_input = ImageDataGenerator(rescale= 1/255.0, rotation_range=10,
+    zoom_range=0.1,
+    width_shift_range=0.1,
+    height_shift_range=0.1,
+    shear_range=0.1,
+    horizontal_flip=True,
+    fill_mode="nearest")
 
-train_img_path = "Sanskrit/sanskrit_test_data"
-num_classes = 58
-batch_size = 8
+test_image_path = "Sanskrit/sanskrit_test_data"
 train_gen = test_input.flow_from_directory(
-    directory=train_img_path,
+    directory=test_image_path,
     target_size=(28, 28),
     color_mode="grayscale",
-    batch_size=batch_size,
+    batch_size=8,
     class_mode="categorical",
-    subset='training',
-    shuffle=True,
-    seed=42
 )
 
 model_path = 'sanskrit_pickle.hdf5'

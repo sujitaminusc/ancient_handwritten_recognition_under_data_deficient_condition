@@ -28,29 +28,33 @@ sess = tf.Session(config=config)
 K.set_session(sess)
 
 
+def build_decoder(n_class, input_shape):
+    decoder = models.Sequential(name='decoder')
+    decoder.add(Dense(input_dim=16 * n_class, activation="relu", units=7 * 7 * 32))
+    decoder.add(Reshape((7, 7, 32)))
+    decoder.add(BatchNormalization(momentum=0.8))
+    decoder.add(layers.Deconvolution2D(32, 3, 3, subsample=(1, 1), border_mode='same', activation="relu"))
+    decoder.add(layers.Deconvolution2D(16, 3, 3, subsample=(2, 2), border_mode='same', activation="relu"))
+    decoder.add(layers.Deconvolution2D(8, 3, 3, subsample=(2, 2), border_mode='same', activation="relu"))
+    decoder.add(layers.Deconvolution2D(4, 3, 3, subsample=(1, 1), border_mode='same', activation="relu"))
+    decoder.add(layers.Deconvolution2D(1, 3, 3, subsample=(1, 1), border_mode='same', activation="sigmoid"))
+    decoder.add(layers.Reshape(target_shape=input_shape, name='out_recon'))
+    return decoder
+
 def CapsNet(input_shape, n_class, routings):
     x = layers.Input(shape=input_shape)
     conv1 = layers.Conv2D(filters=64, kernel_size=3, strides=1, padding='valid', activation='relu', name='conv1')(x)
     conv2 = layers.Conv2D(filters=128, kernel_size=3, strides=1, padding='valid', activation='relu', name='conv2')(conv1)
     conv3 = layers.Conv2D(filters=256, kernel_size=3, strides=2, padding='valid', activation='relu', name='conv3')(conv2)
     primarycaps = PrimaryCap(conv3, dim_capsule=8, n_channels=32, kernel_size=9, strides=2, padding='valid')
-    digitcaps = CapsuleLayer(num_capsule=n_class, dim_capsule=16, routings=routings,channels=32,name='digitcaps')(primarycaps)    
+    digitcaps = CapsuleLayer(num_capsule=n_class, dim_capsule=16, routings=routings, channels=32, name='digitcaps')(primarycaps)
     out_caps = Length(name='capsnet')(digitcaps)
 
     y = layers.Input(shape=(n_class,))
     masked_by_y = Mask()([digitcaps, y])
-    masked = Mask()(digitcaps) 
+    masked = Mask()(digitcaps)
 
-    decoder = models.Sequential(name='decoder')
-    decoder.add(Dense(input_dim=16*n_class, activation="relu", output_dim=7*7*32))
-    decoder.add(Reshape((7, 7, 32)))
-    decoder.add(BatchNormalization(momentum=0.8))
-    decoder.add(layers.Deconvolution2D(32, 3, 3,subsample=(1, 1),border_mode='same', activation="relu"))
-    decoder.add(layers.Deconvolution2D(16, 3, 3,subsample=(2, 2),border_mode='same', activation="relu"))
-    decoder.add(layers.Deconvolution2D(8, 3, 3,subsample=(2, 2),border_mode='same', activation="relu"))
-    decoder.add(layers.Deconvolution2D(4, 3, 3,subsample=(1, 1),border_mode='same', activation="relu"))
-    decoder.add(layers.Deconvolution2D(1, 3, 3,subsample=(1, 1),border_mode='same', activation="sigmoid"))
-    decoder.add(layers.Reshape(target_shape=input_shape, name='out_recon'))     
+    decoder = build_decoder(n_class, input_shape)
     
     train_model = models.Model([x, y], [out_caps, decoder(masked_by_y)])
     eval_model = models.Model(x, [out_caps, decoder(masked)])
@@ -59,11 +63,23 @@ def CapsNet(input_shape, n_class, routings):
 
 
 def margin_loss(y_true, y_pred):
-    L = y_true * K.square(K.maximum(0., 0.9 - y_pred)) + \
-        0.5 * (1 - y_true) * K.square(K.maximum(0., y_pred - 0.1))
+    positive_margin = K.maximum(0., 0.9 - y_pred)
+    negative_margin = K.maximum(0., y_pred - 0.1)
 
-    return K.mean(K.sum(L, 1))
+    positive_term = y_true * K.square(positive_margin)
+    negative_term = 0.5 * (1 - y_true) * K.square(negative_margin)
 
+    L = positive_term + negative_term
+    return K.mean(K.sum(L, axis=1))
+
+
+def train_generator(x, y, batch_size, shift_fraction=0.):
+    train_datagen = ImageDataGenerator(width_shift_range=shift_fraction,
+                                       height_shift_range=shift_fraction)
+    generator = train_datagen.flow(x, y, batch_size=batch_size)
+    while 1:
+        x_batch, y_batch = generator.next()
+        yield ([x_batch, y_batch], [y_batch, x_batch])
 
 def train(model, data, args):
     (x_train, y_train), (x_test, y_test) = data
@@ -78,20 +94,14 @@ def train(model, data, args):
                   loss_weights=[1., args.lam_recon],
                   metrics={'capsnet': 'accuracy'})
 
-    def train_generator(x, y, batch_size, shift_fraction=0.):
-        train_datagen = ImageDataGenerator(width_shift_range=shift_fraction,
-                                           height_shift_range=shift_fraction)
-        generator = train_datagen.flow(x, y, batch_size=batch_size)
-        while 1:
-            x_batch, y_batch = generator.next()
-            yield ([x_batch, y_batch], [y_batch, x_batch])
+    train_gen = train_generator(x_train, y_train, args.batch_size, args.shift_fraction)
 
-    model.fit_generator(generator=train_generator(x_train, y_train, args.batch_size, args.shift_fraction),
+    model.fit_generator(generator=train_gen,
                         steps_per_epoch=int(y_train.shape[0] / args.batch_size),
                         epochs=args.epochs,
-                        shuffle = True,
+                        shuffle=True,
                         validation_data=[[x_test, y_test], [y_test, x_test]],
-                        callbacks=snapshot.get_callbacks(log,model_prefix=model_prefix))
+                        callbacks=snapshot.get_callbacks(log, model_prefix=model_prefix))
 
     model.save_weights(args.save_dir + '/trained_model.h5')
     print('Trained model saved to \'%s/trained_model.h5\'' % args.save_dir)
@@ -101,9 +111,15 @@ def train(model, data, args):
 
 def test(model, data, args):
     x_test, y_test = data
-    y_pred, x_recon = model.predict(x_test, batch_size=args.batch_size*8)
-    print('-'*30 + 'Begin: test' + '-'*30)
-    print('Test acc:', np.sum(np.argmax(y_pred, 1) == np.argmax(y_test, 1))/float(y_test.shape[0]))
+    batch_size_multiplier = 8
+
+    y_pred, x_recon = model.predict(x_test, batch_size=args.batch_size * batch_size_multiplier)
+
+    print('-' * 30 + 'Begin: test' + '-' * 30)
+    test_accuracy = np.sum(np.argmax(y_pred, 1) == np.argmax(y_test, 1)) / float(y_test.shape[0])
+    print('Test acc:', test_accuracy)
+
+    return test_accuracy
     
 class dataGeneration():
     def __init__(self, model,data,args,samples_to_generate = 2):
@@ -112,7 +128,7 @@ class dataGeneration():
         self.args = args
         self.samples_to_generate = samples_to_generate
         print("-"*100)
-        
+
         (x_train, y_train), (x_test, y_test), x_recon = self.remove_missclassifications()
         self.data = (x_train, y_train), (x_test, y_test)
         self.reconstructions = x_recon
@@ -209,96 +225,168 @@ class dataGeneration():
         return x_inst,pos,x_masked_inst
     
     def decoder_retraining_dataset(self):
-        model = self.model
-        data = self.data
-        args = self.args
-        x_recon = self.reconstructions
-        (x_train, y_train), (x_test, y_test) = data 
-        if not os.path.exists(args.save_dir+"/check"):
-            os.makedirs(args.save_dir+"/check")
-        if not os.path.exists(args.save_dir+"/check/x_decoder_retrain.npy"):
-            for q in range(0,x_recon.shape[0]):
-                save_img = Image.fromarray((x_recon[q]*255).reshape(28,28).astype(np.uint8))
-                image_more_sharp = save_img.filter(ImageFilter.UnsharpMask(radius=1, percent=1000, threshold=1))
-                img_arr = np.asarray(image_more_sharp)
-                img_arr = img_arr.reshape(-1,28,28,1).astype('float32') / 255.
-                if (q==0):
-                    x_recon_sharped = np.concatenate([img_arr])
-                else:
-                    x_recon_sharped = np.concatenate([x_recon_sharped,img_arr])
-            self.save_output_image(x_recon_sharped[:100],"sharpened reconstructions")
-            x_decoder_retrain = self.masked_inst_parameter
-            y_decoder_retrain = x_recon_sharped
-            np.save(args.save_dir+"/check/x_decoder_retrain",x_decoder_retrain)
-            np.save(args.save_dir+"/check/y_decoder_retrain",y_decoder_retrain)
+            model = self.model
+            data = self.data
+            args = self.args
+            x_recon = self.reconstructions
+            (x_train, y_train), (x_test, y_test) = data
+
+            check_dir = os.path.join(args.save_dir, "check")
+            if not os.path.exists(check_dir):
+                os.makedirs(check_dir)
+
+            x_decoder_retrain, y_decoder_retrain = self.load_or_preprocess_retrain_data(x_recon, check_dir)
+
+            return x_decoder_retrain, y_decoder_retrain
+
+    def load_or_preprocess_retrain_data(self, x_recon, check_dir):
+        x_decoder_retrain_file = os.path.join(check_dir, "x_decoder_retrain.npy")
+        y_decoder_retrain_file = os.path.join(check_dir, "y_decoder_retrain.npy")
+
+        if not os.path.exists(x_decoder_retrain_file):
+            x_decoder_retrain, y_decoder_retrain = self.preprocess_retrain_data(x_recon, check_dir)
+            np.save(x_decoder_retrain_file, x_decoder_retrain)
+            np.save(y_decoder_retrain_file, y_decoder_retrain)
         else:
-            x_decoder_retrain = np.load(args.save_dir+"/check/x_decoder_retrain.npy")
-            y_decoder_retrain = np.load(args.save_dir+"/check/y_decoder_retrain.npy")
-        return x_decoder_retrain,y_decoder_retrain
+            x_decoder_retrain = np.load(x_decoder_retrain_file)
+            y_decoder_retrain = np.load(y_decoder_retrain_file)
+
+        return x_decoder_retrain, y_decoder_retrain
+
+    def preprocess_retrain_data(self, x_recon, check_dir):
+        x_recon_sharped = self.sharpen_reconstructions(x_recon)
+        self.save_output_image(x_recon_sharped[:100], "sharpened reconstructions")
+
+        x_decoder_retrain = self.masked_inst_parameter
+        y_decoder_retrain = x_recon_sharped
+
+        return x_decoder_retrain, y_decoder_retrain
+
+    def sharpen_reconstructions(self, x_recon):
+        x_recon_sharped = np.empty([0])
+        for q in range(0, x_recon.shape[0]):
+            save_img = Image.fromarray((x_recon[q] * 255).reshape(28, 28).astype(np.uint8))
+            image_more_sharp = save_img.filter(ImageFilter.UnsharpMask(radius=1, percent=1000, threshold=1))
+            img_arr = np.asarray(image_more_sharp)
+            img_arr = img_arr.reshape(-1, 28, 28, 1).astype('float32') / 255.
+            x_recon_sharped = np.concatenate([x_recon_sharped, img_arr]) if x_recon_sharped.size else img_arr
+        return x_recon_sharped
     
     def decoder_retraining(self):
         model = self.model
         data = self.data
         args = self.args
-        x_decoder_retrain, y_decoder_retrain = self.x_decoder_retrain,self.y_decoder_retrain
-        
-        decoder = eval_model.get_layer('decoder')
-        decoder_in = layers.Input(shape=(16*47,))
-        decoder_out = decoder(decoder_in)
-        retrained_decoder = models.Model(decoder_in,decoder_out)
-        if (args.verbose):
-            retrained_decoder.summary()
-        retrained_decoder.compile(optimizer=optimizers.Adam(lr=args.lr),loss='mse',loss_weights=[1.0])
-        if not os.path.exists(args.save_dir+"/retrained_decoder.h5"):
-            retrained_decoder.fit(x_decoder_retrain, y_decoder_retrain, batch_size=args.batch_size, epochs=20)
+        x_decoder_retrain, y_decoder_retrain = self.x_decoder_retrain, self.y_decoder_retrain
+
+        retrained_decoder = self.build_retrained_decoder(model, args)
+
+        if not os.path.exists(args.save_dir + "/retrained_decoder.h5"):
+            self.train_retrained_decoder(retrained_decoder, x_decoder_retrain, y_decoder_retrain, args)
             retrained_decoder.save_weights(args.save_dir + '/retrained_decoder.h5')
         else:
             retrained_decoder.load_weights(args.save_dir + '/retrained_decoder.h5')
-        
-        retrained_reconstructions = retrained_decoder.predict(x_decoder_retrain, batch_size=args.batch_size)
-        self.save_output_image(retrained_reconstructions[:100],"retrained reconstructions")
+
+        retrained_reconstructions = self.predict_retrained_decoder(retrained_decoder, x_decoder_retrain, args)
+        self.save_output_image(retrained_reconstructions[:100], "retrained reconstructions")
+
         return retrained_decoder
+
+    def build_retrained_decoder(self, model, args):
+        decoder = model.get_layer('decoder')
+        decoder_in = layers.Input(shape=(16 * args.num_cls,))
+        decoder_out = decoder(decoder_in)
+        retrained_decoder = models.Model(decoder_in, decoder_out)
+        if args.verbose:
+            retrained_decoder.summary()
+        retrained_decoder.compile(optimizer=optimizers.Adam(lr=args.lr), loss='mse', loss_weights=[1.0])
+        return retrained_decoder
+
+    def train_retrained_decoder(self, retrained_decoder, x_decoder_retrain, y_decoder_retrain, args):
+        retrained_decoder.fit(x_decoder_retrain, y_decoder_retrain, batch_size=args.batch_size, epochs=20)
+
+    def predict_retrained_decoder(self, retrained_decoder, x_decoder_retrain, args):
+        return retrained_decoder.predict(x_decoder_retrain, batch_size=args.batch_size)
         
     def get_limits(self):
         args = self.args
         x_inst = self.inst_parameter
         pos = self.global_position
-        glob_min = np.amin(x_inst.transpose(),axis=1)
-        glob_max = np.amax(x_inst.transpose(),axis=1)
-        
-        if not os.path.exists(args.save_dir+"/check"):
-            os.makedirs(args.save_dir+"/check")
-        if not os.path.exists(args.save_dir+"/check/class_cov.npy"):
-            for cl in range(0,self.args.num_cls):
-                tmp_glob = []
-                for it in range(0,x_inst.shape[0]):
-                    if (pos[it]==cl):
-                        tmp_glob.append(x_inst[it])
-                tmp_glob = np.asarray(tmp_glob)
-                tmp_glob = tmp_glob.transpose()
-                tmp_cov_max = np.flip(np.argsort(np.around(np.cov(tmp_glob),5).diagonal()),axis=0)
-                tmp_min = np.amin(tmp_glob,axis=1)
-                tmp_max = np.amax(tmp_glob,axis=1)
-                if (cl==0):
-                    class_cov = np.vstack([tmp_cov_max])
-                    class_min = np.vstack([tmp_min])
-                    class_max = np.vstack([tmp_max])
-                else:
-                    class_cov = np.vstack([class_cov,tmp_cov_max])
-                    class_min = np.vstack([class_min,tmp_min]) 
-                    class_max = np.vstack([class_max,tmp_max]) 
-            np.save(args.save_dir+"/check/class_cov",class_cov)
-            np.save(args.save_dir+"/check/class_min",class_min)
-            np.save(args.save_dir+"/check/class_max",class_max)
+
+        glob_min, glob_max = self.calculate_global_limits(x_inst)
+
+        check_dir = os.path.join(args.save_dir, "check")
+        if not os.path.exists(check_dir):
+            os.makedirs(check_dir)
+
+        class_cov, class_min, class_max = self.load_or_calculate_class_limits(x_inst, pos, args.num_cls, check_dir)
+
+        return class_cov, class_max, class_min
+
+    def calculate_global_limits(self, x_inst):
+        glob_min = np.amin(x_inst.transpose(), axis=1)
+        glob_max = np.amax(x_inst.transpose(), axis=1)
+        return glob_min, glob_max
+
+    def load_or_calculate_class_limits(self, x_inst, pos, num_cls, check_dir):
+        class_cov_file = os.path.join(check_dir, "class_cov.npy")
+        class_min_file = os.path.join(check_dir, "class_min.npy")
+        class_max_file = os.path.join(check_dir, "class_max.npy")
+
+        if not os.path.exists(class_cov_file):
+            class_cov, class_min, class_max = self.calculate_class_limits(x_inst, pos, num_cls)
+            np.save(class_cov_file, class_cov)
+            np.save(class_min_file, class_min)
+            np.save(class_max_file, class_max)
         else:
-            class_cov = np.load(args.save_dir+"/check/class_cov.npy")
-            class_min = np.load(args.save_dir+"/check/class_min.npy")
-            class_max = np.load(args.save_dir+"/check/class_max.npy")
-        return class_cov,class_max,class_min
+            class_cov = np.load(class_cov_file)
+            class_min = np.load(class_min_file)
+            class_max = np.load(class_max_file)
+
+        return class_cov, class_min, class_max
+
+    def calculate_class_limits(self, x_inst, pos, num_cls):
+        class_cov = np.empty([0])
+        class_min = np.empty([0])
+        class_max = np.empty([0])
+
+        for cl in range(0, num_cls):
+            tmp_glob = self.extract_class_data(x_inst, pos, cl)
+            tmp_cov_max, tmp_min, tmp_max = self.calculate_class_statistics(tmp_glob)
+
+            class_cov, class_min, class_max = self.append_to_class_limits(class_cov, class_min, class_max,
+                                                                          tmp_cov_max, tmp_min, tmp_max)
+
+        return class_cov, class_min, class_max
+
+    def extract_class_data(self, x_inst, pos, cl):
+        tmp_glob = []
+        for it in range(0, x_inst.shape[0]):
+            if pos[it] == cl:
+                tmp_glob.append(x_inst[it])
+        return np.asarray(tmp_glob)
+
+    def calculate_class_statistics(self, tmp_glob):
+        tmp_glob = tmp_glob.transpose()
+        tmp_cov_max = np.flip(np.argsort(np.around(np.cov(tmp_glob), 5).diagonal()), axis=0)
+        tmp_min = np.amin(tmp_glob, axis=1)
+        tmp_max = np.amax(tmp_glob, axis=1)
+        return tmp_cov_max, tmp_min, tmp_max
+
+    def append_to_class_limits(self, class_cov, class_min, class_max, tmp_cov_max, tmp_min, tmp_max):
+        if class_cov.size == 0:
+            class_cov = np.vstack([tmp_cov_max])
+            class_min = np.vstack([tmp_min])
+            class_max = np.vstack([tmp_max])
+        else:
+            class_cov = np.vstack([class_cov, tmp_cov_max])
+            class_min = np.vstack([class_min, tmp_min])
+            class_max = np.vstack([class_max, tmp_max])
+
+        return class_cov, class_min, class_max
 
     def generate_data(self):
         data = self.data
-        args = self.args   
+        args = self.args
         (x_train, y_train), (x_test, y_test) = data
         x_masked_inst = self.masked_inst_parameter
         pos = self.global_position
@@ -307,59 +395,70 @@ class dataGeneration():
         class_max = self.class_max
         class_min = self.class_min
         samples_to_generate = self.samples_to_generate
-        generated_images = np.empty([0,x_train.shape[1],x_train.shape[2],x_train.shape[3]])
-        generated_images_with_ori = np.empty([0,x_train.shape[1],x_train.shape[2],x_train.shape[3]])
+
+        generated_images, generated_images_with_ori, generated_labels = self.generate_images(x_train, x_masked_inst, pos,
+                                                                                             retrained_decoder, class_cov,
+                                                                                             class_max, class_min,
+                                                                                             samples_to_generate,
+                                                                                             args.num_cls)
+
+        self.save_output_image(generated_images, "generated_images")
+        self.save_output_image(generated_images_with_ori, "generated_images with originals")
+
+        generated_labels = keras.utils.to_categorical(generated_labels, num_classes=args.num_cls)
+        generated_data_dir = args.save_dir + "/generated_data"
+        if not os.path.exists(generated_data_dir):
+            os.makedirs(generated_data_dir)
+
+        np.save(os.path.join(generated_data_dir, "generated_images"), generated_images)
+        np.save(os.path.join(generated_data_dir, "generated_label"), generated_labels)
+
+        return generated_images, generated_labels
+
+    def generate_images(self, x_train, x_masked_inst, pos, retrained_decoder, class_cov, class_max, class_min,
+                        samples_to_generate, num_cls):
+        generated_images = np.empty([0, x_train.shape[1], x_train.shape[2], x_train.shape[3]])
+        generated_images_with_ori = np.empty([0, x_train.shape[1], x_train.shape[2], x_train.shape[3]])
         generated_labels = np.empty([0])
-        for cl in range(0,args.num_cls):
+
+        for cl in range(0, num_cls):
             count = 0
-            for it in range(0,x_masked_inst.shape[0]): 
-                if (count==samples_to_generate):
+            for it in range(0, x_masked_inst.shape[0]):
+                if count == samples_to_generate:
                     break
-                if (pos[it]==cl):
+                if pos[it] == cl:
                     count = count + 1
-                    generated_images_with_ori = np.concatenate([generated_images_with_ori,x_train[it].reshape(1,x_train.shape[1],x_train.shape[2],x_train.shape[3])])
+                    generated_images_with_ori = np.concatenate(
+                        [generated_images_with_ori, x_train[it].reshape(1, x_train.shape[1], x_train.shape[2], x_train.shape[3])])
                     noise_vec = x_masked_inst[it][x_masked_inst[it].nonzero()]
-                    for inst in range(int(class_cov.shape[1]/2)):
-                        ind = np.where(class_cov[cl]==inst)[0][0]
-                        noise = np.random.uniform(class_min[cl][ind],class_max[cl][ind])
+                    for inst in range(int(class_cov.shape[1] / 2)):
+                        ind = np.where(class_cov[cl] == inst)[0][0]
+                        noise = np.random.uniform(class_min[cl][ind], class_max[cl][ind])
                         noise_vec[ind] = noise
                     x_masked_inst[it][x_masked_inst[it].nonzero()] = noise_vec
-                    new_image = retrained_decoder.predict(x_masked_inst[it].reshape(1,args.num_cls*class_cov.shape[1]))
-                    generated_images = np.concatenate([generated_images,new_image])
-                    generated_labels = np.concatenate([generated_labels,np.asarray([cl])])
-                    generated_images_with_ori = np.concatenate([generated_images_with_ori,new_image])
-        self.save_output_image(generated_images,"generated_images")
-        self.save_output_image(generated_images_with_ori,"generated_images with originals")
-        generated_labels = keras.utils.to_categorical(generated_labels, num_classes=args.num_cls)
-        if not os.path.exists(args.save_dir+"/generated_data"):
-            os.makedirs(args.save_dir+"/generated_data")
-        np.save(args.save_dir+"/generated_data/generated_images",generated_images)
-        np.save(args.save_dir+"/generated_data/generated_label",generated_labels)
-        return generated_images,generated_labels
+                    new_image = retrained_decoder.predict(x_masked_inst[it].reshape(1, num_cls * class_cov.shape[1]))
+                    generated_images = np.concatenate([generated_images, new_image])
+                    generated_labels = np.concatenate([generated_labels, np.asarray([cl])])
+                    generated_images_with_ori = np.concatenate([generated_images_with_ori, new_image])
+
+        return generated_images, generated_images_with_ori, generated_labels
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TextCaps")
     parser.add_argument('--epochs', default=10403021, type=int)
     parser.add_argument('--verbose', default=False, type=bool)
     parser.add_argument('--cnt', default=190, type=int)
-    parser.add_argument('-n','--num_cls', default=47, type=int, help="Iterations")
+    parser.add_argument('-n', '--num_cls', default=47, type=int, help="Iterations")
     parser.add_argument('--batch_size', default=32, type=int)
     parser.add_argument('--samples_to_generate', default=10, type=int)
-    parser.add_argument('--lr', default=0.001, type=float,
-                        help="Initial learning rate")
-    parser.add_argument('--lr_decay', default=0.9, type=float,
-                        help="The value multiplied by lr at each epoch. Set a larger value for larger epochs")
-    parser.add_argument('--lam_recon', default=0.392, type=float,
-                        help="The coefficient for the loss of decoder")
-    parser.add_argument('-r', '--routings', default=3, type=int,
-                        help="Number of iterations used in routing algorithm. should > 0")
-    parser.add_argument('--shift_fraction', default=0.1, type=float,
-                        help="Fraction of pixels to shift at most in each direction.")
+    parser.add_argument('--lr', default=0.001, type=float, help="Initial learning rate")
+    parser.add_argument('--lr_decay', default=0.9, type=float, help="The value multiplied by lr at each epoch. Set a larger value for larger epochs")
+    parser.add_argument('--lam_recon', default=0.392, type=float, help="The coefficient for the loss of decoder")
+    parser.add_argument('-r', '--routings', default=3, type=int, help="Number of iterations used in routing algorithm. should > 0")
+    parser.add_argument('--shift_fraction', default=0.1, type=float, help="Fraction of pixels to shift at most in each direction.")
     parser.add_argument('--save_dir', default='./emnist_bal_200')
-    parser.add_argument('-dg', '--data_generate', action='store_true',
-                        help="Generate new data2 with pre-trained model")
-    parser.add_argument('-w', '--weights', default=None,
-                        help="The path of the saved weights. Should be specified when testing")
+    parser.add_argument('-dg', '--data_generate', action='store_true', help="Generate new data2 with pre-trained model")
+    parser.add_argument('-w', '--weights', default=None, help="The path of the saved weights. Should be specified when testing")
     args = parser.parse_args()
     print(args)
 
@@ -369,25 +468,26 @@ if __name__ == "__main__":
     (x_train, y_train), (x_test, y_test) = load_emnist_balanced(args.cnt)
 
     model, eval_model = CapsNet(input_shape=x_train.shape[1:],
-                                                  n_class=len(np.unique(np.argmax(y_train, 1))),
-                                                  routings=args.routings)
-    if (args.verbose):
+                                n_class=len(np.unique(np.argmax(y_train, 1))),
+                                routings=args.routings)
+    if args.verbose:
         model.summary()
 
     M = 3
     nb_epoch = T = args.epochs
     alpha_zero = 0.01
     model_prefix = 'Model_'
-    snapshot = SnapshotCallbackBuilder(T, M, alpha_zero,args.save_dir)
-    
+    snapshot = SnapshotCallbackBuilder(T, M, alpha_zero, args.save_dir)
+
     if args.weights is not None:
         model.load_weights(args.weights)
-    if not args.data_generate:      
+    if not args.data_generate:
         train(model=model, data=((x_train, y_train), (x_test, y_test)), args=args)
         test(model=eval_model, data=(x_test, y_test), args=args)
-        
     else:
         if args.weights is None:
             print('No weights are provided. You need to train a model first.')
         else:
-            data_generator = dataGeneration(model=eval_model, data=((x_train, y_train), (x_test, y_test)), args=args, samples_to_generate = args.samples_to_generate)
+            data_generator = dataGeneration(model=eval_model, data=((x_train, y_train), (x_test, y_test)),
+                                            args=args, samples_to_generate=args.samples_to_generate)
+            
